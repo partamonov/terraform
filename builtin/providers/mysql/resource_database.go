@@ -5,8 +5,6 @@ import (
 	"log"
 	"strings"
 
-	mysqlc "github.com/ziutek/mymysql/mysql"
-
 	"github.com/hashicorp/terraform/helper/schema"
 )
 
@@ -43,12 +41,17 @@ func resourceDatabase() *schema.Resource {
 }
 
 func CreateDatabase(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(mysqlc.Conn)
+	client := meta.(*Client)
+	conn, err := client.Connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 
 	stmtSQL := databaseConfigSQL("CREATE", d)
 	log.Println("Executing statement:", stmtSQL)
 
-	_, _, err := conn.Query(stmtSQL)
+	_, err = conn.Query(stmtSQL)
 	if err != nil {
 		return err
 	}
@@ -59,12 +62,17 @@ func CreateDatabase(d *schema.ResourceData, meta interface{}) error {
 }
 
 func UpdateDatabase(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(mysqlc.Conn)
+	client := meta.(*Client)
+	conn, err := client.Connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 
 	stmtSQL := databaseConfigSQL("ALTER", d)
 	log.Println("Executing statement:", stmtSQL)
 
-	_, _, err := conn.Query(stmtSQL)
+	_, err = conn.Query(stmtSQL)
 	if err != nil {
 		return err
 	}
@@ -73,7 +81,12 @@ func UpdateDatabase(d *schema.ResourceData, meta interface{}) error {
 }
 
 func ReadDatabase(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(mysqlc.Conn)
+	client := meta.(*Client)
+	conn, err := client.Connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 
 	// This is kinda flimsy-feeling, since it depends on the formatting
 	// of the SHOW CREATE DATABASE output... but this data doesn't seem
@@ -84,19 +97,20 @@ func ReadDatabase(d *schema.ResourceData, meta interface{}) error {
 	stmtSQL := "SHOW CREATE DATABASE " + quoteIdentifier(name)
 
 	log.Println("Executing query:", stmtSQL)
-	rows, _, err := conn.Query(stmtSQL)
+	rows, err := conn.Query(stmtSQL)
 	if err != nil {
-		if mysqlErr, ok := err.(*mysqlc.Error); ok {
-			if mysqlErr.Code == mysqlc.ER_BAD_DB_ERROR {
-				d.SetId("")
-				return nil
-			}
-		}
-		return err
+		d.SetId("")
+		return nil
 	}
 
-	row := rows[0]
-	createSQL := string(row[1].([]byte))
+	var dummy []byte
+	var collation, createSQL string
+
+	for rows.Next() {
+		if err := rows.Scan(&dummy, &createSQL); err != nil {
+			return err
+		}
+	}
 
 	defaultCharset := extractIdentAfter(createSQL, defaultCharacterSetKeyword)
 	defaultCollation := extractIdentAfter(createSQL, defaultCollateKeyword)
@@ -105,16 +119,22 @@ func ReadDatabase(d *schema.ResourceData, meta interface{}) error {
 		// MySQL doesn't return the collation if it's the default one for
 		// the charset, so if we don't have a collation we need to go
 		// hunt for the default.
-		stmtSQL := "SHOW COLLATION WHERE `Charset` = '%s' AND `Default` = 'Yes'"
-		rows, _, err := conn.Query(stmtSQL, defaultCharset)
+		stmtSQL := fmt.Sprintf("SHOW COLLATION WHERE `Charset` = '%s' AND `Default` = 'Yes'", defaultCharset)
+		rws, err := conn.Query(stmtSQL)
 		if err != nil {
 			return fmt.Errorf("Error getting default charset: %s", err)
 		}
-		if len(rows) == 0 {
+
+		for rws.Next() {
+			if err := rws.Scan(&collation, &dummy, &dummy, &dummy, &dummy, &dummy); err != nil {
+				return fmt.Errorf("Error getting default collation: %s", err)
+			}
+		}
+
+		if collation == "" {
 			return fmt.Errorf("Charset %s has no default collation", defaultCharset)
 		}
-		row := rows[0]
-		defaultCollation = string(row[0].([]byte))
+		defaultCollation = collation
 	}
 
 	d.Set("default_character_set", defaultCharset)
@@ -124,13 +144,18 @@ func ReadDatabase(d *schema.ResourceData, meta interface{}) error {
 }
 
 func DeleteDatabase(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(mysqlc.Conn)
+	client := meta.(*Client)
+	conn, err := client.Connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 
 	name := d.Id()
 	stmtSQL := "DROP DATABASE " + quoteIdentifier(name)
 	log.Println("Executing statement:", stmtSQL)
 
-	_, _, err := conn.Query(stmtSQL)
+	_, err = conn.Query(stmtSQL)
 	if err == nil {
 		d.SetId("")
 	}

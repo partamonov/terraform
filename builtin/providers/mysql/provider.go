@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	mysqlc "github.com/ziutek/mymysql/thrsafe"
-
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/terraform"
 )
@@ -41,27 +39,19 @@ func Provider() terraform.ResourceProvider {
 }
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
-
-	var username = d.Get("username").(string)
-	var password = d.Get("password").(string)
-	var endpoint = d.Get("endpoint").(string)
-
-	proto := "tcp"
-	if endpoint[0] == '/' {
-		proto = "unix"
+	config := Config{
+		Endpoint: d.Get("endpoint").(string),
+		Username: d.Get("username").(string),
+		Password: d.Get("password").(string),
 	}
 
-	// mysqlc is the thread-safe implementation of mymysql, so we can
-	// safely re-use the same connection between multiple parallel
-	// operations.
-	conn := mysqlc.New(proto, "", endpoint, username, password)
-
-	err := conn.Connect()
+	client, err := config.NewClient()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error initializing MySQL client: %s", err)
 	}
 
-	return conn, nil
+	return client, nil
+
 }
 
 var identQuoteReplacer = strings.NewReplacer("`", "``")
